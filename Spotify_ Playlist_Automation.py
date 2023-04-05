@@ -1,12 +1,12 @@
 """
-Spotify Playlist Automation 0.8.1
+Spotify Playlist Automation 0.9.2
 
 Spotify Playlist Automation is  little app/script to automat updating of a Spotify playlist.
 A .csv is used as the Input to check when to add a new track to the playlist. Look up all the Spotify Track IDs and create a Spotify playlist with those IDs.
-This is still in Alpha Testing Phase
+Automaticly remove old songs to prevent filling up the playlist to its maximum.
 
 Author: Johannes Schnurrenberger 
-Last Change 08.02.2023
+Last Change 31.03.2023
 """
 
 
@@ -25,13 +25,8 @@ import sys
 
 # Logging
 
-# DEBUG, INFO, WARNING, ERROR, CRITICAL
-# log_level = 'INFO'
-# log_file = 'runtime.log'
-
-
 logfilehandler = TimedRotatingFileHandler(
-    filename='runtime.log', 
+    filename='runtime.log', # Path to logfile
     when='D',
     interval=1,
     backupCount=7,
@@ -39,7 +34,7 @@ logfilehandler = TimedRotatingFileHandler(
     delay=False)
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.INFO, # Loglevels to choose from: DEBUG, INFO, WARNING, ERROR, CRITICAL
     handlers=[
         logfilehandler,
         logging.StreamHandler(sys.stdout)],
@@ -50,7 +45,8 @@ logging.basicConfig(
 # Modules
 
 def read_config(path_to_file):
-    ''' Reads the configuration file
+    ''' 
+    Reads the configuration file
 
     Parameters:
     __________
@@ -106,7 +102,7 @@ def check_csv(path_to_file):
     return os.path.getmtime(path_to_file)
 
 
-def read_dbc_export(path_to_file):
+def read_dbc_export(path_to_file) -> str:
     '''
     Reads a csv file on a local server and extracts the data in a pandas dataframe
 
@@ -128,10 +124,10 @@ def read_dbc_export(path_to_file):
     return data
 
 
-def update_spotify_playlist(username, sci, scs, uri, playlist_id, songs_played):
+def add_track_to_playlist(username, sci, scs, uri, playlist_id, songs_played) -> None:
     '''
     Takes two Strings (Artist, Title) and searches the Spotify Track ID via the Spotify API.
-    Then Adds those Track IDs to a Spotify Playlist
+    Then Adds those Track IDs to a Spotify Playlist at the beginning of the playlist
     
     Parameters:
 	__________
@@ -146,10 +142,10 @@ def update_spotify_playlist(username, sci, scs, uri, playlist_id, songs_played):
     Nothing
     '''
     
-    logging.info('{}: Starting playlist update'.format(update_spotify_playlist.__name__))
+    logging.info('{}: Starting playlist update'.format(add_track_to_playlist.__name__))
     logging.debug('Updating Playlist with these parameters {}, {}, {}, {}'.format(username, sci, playlist_id, uri))
     
-    scope = 'playlist-modify-private' # TODO Change to 'playlist-modify-public' for production
+    scope = 'playlist-modify-public' # TODO Change to 'playlist-modify-public' for production
     playlist = []
 
     # Get connection to Spotify
@@ -175,9 +171,63 @@ def update_spotify_playlist(username, sci, scs, uri, playlist_id, songs_played):
     user_id = sp.me()['id']
     
     # Add tracks to palylist
-    sp.user_playlist_add_tracks(user_id, playlist_id, playlist)
+    try:
+        sp.user_playlist_add_tracks(user_id, playlist_id, playlist, position=0)
+        logging.info('Playlist update succesfull')
+    except err:
+        logging.warning(err)    
+
+
+def remove_track_from_playlist(username, sci, scs, uri, playlist_id) -> None:
+    '''
+    Removes the last Track of the a given Sotify playist
+
+    Parameters:
+	__________
+    username: the spotify username
+    sci: spotify client ID
+    scs: spotify client Secret
+    uir: spotify return URI necessary for SpotifyOAuth
+    playlist_id: ID of the playlist to update (can be found in the browser URL when the Playlist is open)
     
-    logging.info('Playlist update succesfull')
+    Returns:
+    None
+    '''
+
+    logging.info('{}: Removing tracks from Playlist'.format(remove_track_from_playlist.__name__))
+    logging.debug('Removing Tracks with these parameters {}, {}, {}'.format(username, sci, playlist_id))
+    
+    scope = 'playlist-modify-public' # TODO Change to 'playlist-modify-public' for production
+
+    # Get connection to Spotify
+    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(username=username, client_id=sci,scope=scope ,client_secret=scs ,redirect_uri=uri))
+
+    # Get all playlist tracks
+    playlist_tracks = []
+    results = sp.user_playlist_tracks(username,playlist_id)
+    playlist_tracks = results['items']
+    while results['next']:
+        results = sp.next(results)
+        playlist_tracks.extend(results['items'])
+
+    # Get number of songs in playlist
+    num_tracks = len(playlist_tracks)
+    logging.info('{} tracks are in the playlist'.format(num_tracks))
+    
+    # Do nothing if playlist is less then 100 songs long
+    if num_tracks <= 100:
+        return
+
+    # Get IDs of the last 100 Songs
+    last_100_track_ids = []
+    for i in range(100):
+        last_100_track_ids.append(playlist_tracks[i]['track']['id'])
+
+    # Delete all tracks besides the last 100
+    for i in range(num_tracks - 101, -1, -1):
+        if playlist_tracks[i]['track']['id'] not in last_100_track_ids:
+            logging.info('{}: Removing tracks with Track ID {}'.format(remove_track_from_playlist.__name__, playlist_tracks[i]['track']['id']))
+            sp.playlist_remove_all_occurrences_of_items(playlist_id, [playlist_tracks[i]['track']['id']])
 
 
 def main():
@@ -198,10 +248,22 @@ def main():
             logging.info('{}: {} has been changed.'.format(main.__name__, csv))
 
             # Read in the file with the broadcasted playlist
-            songs_played = read_dbc_export(csv)
+            try:
+                songs_played = read_dbc_export(csv)
+            except PermissionError as err:
+                logging.warning('Cannot open file \n{}'.format(err))
+
+            # Remove the last song from the playlist to make space
+            try:
+                remove_track_from_playlist(username, sci, scs, uri, playlist_id)
+            except Exception as err:
+                logging.warning(err)     
 
             # Add all tracks that were played to the playlist
-            update_spotify_playlist(username, sci, scs, uri, playlist_id, songs_played)            
+            try:
+                add_track_to_playlist(username, sci, scs, uri, playlist_id, songs_played)
+            except Exception as err:
+                logging.warning(err)            
 
         else:
             continue
